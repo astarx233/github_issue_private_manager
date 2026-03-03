@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GHPN Minimal (ListView) + Kanban + DnD + Export/Import + Copy + Native Labels
 // @namespace    https://example.local/
-// @version      0.3.2
-// @description  Private tag/note + Kanban modal (3 cols) + drag/drop + quick DONE + export/import + Copy List + Native GitHub labels under title. No template literals.
+// @version      0.3.3
+// @description  Private tag/note + Kanban modal (3 cols) + drag/drop + quick DONE + export/import + Copy List + Native GitHub labels in Kanban only. No template literals.
 // @match        https://github.com/*/*/issues*
 // @grant        none
 // ==/UserScript==
@@ -115,7 +115,6 @@
     var fg = cs ? cs.color : '';
     var bd = cs ? cs.borderColor : '';
 
-    // Sometimes styling is on parent
     if (isTransparentColor(bg) && el && el.parentElement) {
       var cs2 = getComputed(el.parentElement);
       if (cs2 && !isTransparentColor(cs2.backgroundColor)) {
@@ -133,20 +132,16 @@
   }
 
   function nearTitleArea(li, el, titleLink) {
-    // Heuristic: label pills usually sit close to the title container.
-    // We'll accept if element shares an ancestor with titleLink within the row.
     if (!titleLink) return true;
     if (titleLink.contains(el) || el.contains(titleLink)) return true;
 
-    var a = titleLink;
-    var cur = a;
+    var cur = titleLink;
     var maxHops = 6;
     while (cur && maxHops-- > 0) {
       if (cur.contains && cur.contains(el)) return true;
       cur = cur.parentElement;
     }
 
-    // Or: rectangles align horizontally with title line
     var rT = getRect(titleLink);
     var rE = getRect(el);
     if (rT && rE) {
@@ -158,7 +153,6 @@
   }
 
   function looksLikePill(el) {
-    // Visual pill detector: small, rounded, has a non-transparent background.
     var cs = getComputed(el);
     if (!cs) return false;
 
@@ -168,17 +162,13 @@
     var h = parseFloat(cs.height) || 0;
     var fs = parseFloat(cs.fontSize) || 0;
 
-    // Label pills are usually small
     if (h <= 0 || h > 32) return false;
     if (fs < 10 || fs > 14) return false;
 
-    // Rounded-ish
     var br = cs.borderRadius || '';
-    // If borderRadius is like "999px" or >= 6px, it's plausible.
     var brNum = parseFloat(br) || 0;
     if (br.indexOf('999') === -1 && brNum < 6) return false;
 
-    // Avoid massive containers with background (like row hover blocks)
     var r = getRect(el);
     if (r && (r.width > 360 || r.height > 40)) return false;
 
@@ -188,7 +178,6 @@
   function extractLabelsFromRow(li) {
     var titleLink = li.querySelector('a[data-testid="issue-pr-title-link"]');
 
-    // Strategy 1: real label hooks (when GitHub is being consistent for 5 minutes)
     var cands = [];
     cands = cands.concat(toArray(li.querySelectorAll('a[data-hovercard-type="label"]')));
     cands = cands.concat(toArray(li.querySelectorAll('a[href*="/labels/"]')));
@@ -203,12 +192,10 @@
       var name = normName(el.getAttribute('data-name') || el.textContent);
       if (!looksLikeLabelName(name)) return;
 
-      // Find the styled element: sometimes the style is on a child span
       var pill = el;
       var inner = el.querySelector('span');
       if (inner && looksLikePill(inner)) pill = inner;
 
-      // If el isn't pill-ish, but some child is, use that
       if (!looksLikePill(pill)) {
         var spans = toArray(el.querySelectorAll('span'));
         for (var i = 0; i < spans.length; i++) {
@@ -216,30 +203,24 @@
         }
       }
 
-      // Fallback still: accept even if not pill, but colors may be default
       var colors = readColorsFrom(pill);
-
       out.push({ name: name, bg: colors.bg, fg: colors.fg, bd: colors.bd });
     }
 
     for (var i1 = 0; i1 < cands.length; i1++) {
       var el1 = cands[i1];
-      // avoid catching random label management links elsewhere
       if (!nearTitleArea(li, el1, titleLink)) continue;
       pushLabelFromEl(el1);
     }
 
-    // Strategy 2: visual scan fallback (GitHub DOM roulette)
     if (!out.length) {
-      // Limit scope: scan only within row and focus on likely label elements
-      // We'll scan anchors/spans/divs but cap to avoid murdering performance.
       var pool = [];
       pool = pool.concat(toArray(li.querySelectorAll('a')));
       pool = pool.concat(toArray(li.querySelectorAll('span')));
       pool = pool.concat(toArray(li.querySelectorAll('div')));
       pool = uniqByRef(pool);
 
-      var maxScan = 220; // safety cap per row
+      var maxScan = 220;
       var scanned = 0;
 
       for (var k = 0; k < pool.length && scanned < maxScan; k++) {
@@ -247,22 +228,14 @@
         scanned++;
 
         if (!el || !el.textContent) continue;
-
-        // Must be near the title area to reduce false positives
         if (!nearTitleArea(li, el, titleLink)) continue;
 
         var name2 = normName(el.textContent);
         if (!looksLikeLabelName(name2)) continue;
-
-        // If it looks like a pill, assume it's a label.
-        // This catches GitHub label components even without stable selectors.
         if (!looksLikePill(el)) continue;
 
-        // Avoid picking the issue number chip or other badges:
-        // If the text starts with "#" and is purely numeric, skip.
         if (/^#\d+$/.test(name2)) continue;
 
-        // Avoid "Open", "Closed", etc. (state badges)
         var low2 = name2.toLowerCase();
         if (low2 === 'open' || low2 === 'closed' || low2 === 'merged') continue;
 
@@ -271,7 +244,6 @@
       }
     }
 
-    // Dedup by name (case-insensitive)
     var byName = {};
     var finalOut = [];
     for (var x = 0; x < out.length; x++) {
@@ -331,13 +303,13 @@
     var title = (link.textContent || '').trim();
     var url = new URL(href, location.origin).toString();
 
-    // Native labels
     var labels = extractLabelsFromRow(li);
 
     return { key: key, num: num, title: title, url: url, linkEl: link, labels: labels };
   }
 
   // ---------- Inline inject: badge + edit button + quick done ----------
+  // CHANGE #1: DO NOT inject native labels into the original GitHub issue list UI anymore.
   function ensureInjected(li, repo) {
     if (li.getAttribute('data-ghpn') === '1') return;
 
@@ -352,12 +324,6 @@
       li.querySelector('div[data-listview-item-title-container="true"]') ||
       link.parentElement ||
       li;
-
-    // Put native labels under title. GitHub often uses a title container wrapper.
-    var titleContainer =
-      li.querySelector('div[data-listview-item-title-container="true"]') ||
-      link.parentElement ||
-      anchor;
 
     var badge = document.createElement('span');
     badge.style.cssText =
@@ -381,9 +347,6 @@
     doneBtn.style.cssText =
       'display:none;align-items:center;justify-content:center;width:26px;height:26px;margin-left:6px;' +
       'border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer;user-select:none;font-size:14px;';
-
-    var nativeWrap = makeNativeLabelsWrap(meta.labels || []);
-    nativeWrap.setAttribute('data-ghpn-native', '1');
 
     function refresh() {
       var db = loadDB();
@@ -481,12 +444,6 @@
     });
 
     try {
-      // Inject native labels under title (only once)
-      if (titleContainer && !titleContainer.querySelector('[data-ghpn-native="1"]')) {
-        titleContainer.appendChild(nativeWrap);
-      }
-
-      // Private UI stays on anchor
       anchor.appendChild(badge);
       anchor.appendChild(btn);
       anchor.appendChild(doneBtn);
@@ -708,7 +665,7 @@
         title: rec.title || '',
         url: rec.url || '',
         linkEl: null,
-        labels: [] // repo scope has no DOM, so no native labels
+        labels: []
       });
     }
     out.sort(function (a, b) {
@@ -741,7 +698,7 @@
     var repo = getRepoFromPath();
     var db = loadDB();
     var payload = {
-      version: 'ghpn-0.3.2',
+      version: 'ghpn-0.3.3',
       exportedAt: nowISO(),
       origin: {
         host: location.host,
@@ -950,6 +907,19 @@
       });
     }
 
+    // helper: write to clipboard or fallback
+    function writeClipboard(text, okMsg) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          if (okMsg) alert(okMsg);
+        }).catch(function() {
+          prompt('复制以下内容：', text);
+        });
+      } else {
+        prompt('复制以下内容：', text);
+      }
+    }
+
     function makeCol(titleText, list, colName) {
       var col = document.createElement('div');
       col.className = 'ghpn-col';
@@ -967,6 +937,7 @@
       count.className = 'ghpn-count';
       count.textContent = '(' + list.length + ')';
 
+      // existing copy button: markdown list with title + link
       var copyBtn = document.createElement('button');
       copyBtn.className = 'ghpn-colaction';
       copyBtn.type = 'button';
@@ -982,24 +953,37 @@
           var item = list[i];
           var n = item.num ? ('#' + item.num) : '???';
           var t = (item.title || '').replace(/[\[\]]/g, '');
-          var line = '- ' + n + ' [' + t + '](' + item.url + ')';
+          var u = item.url || '';
+          var line = u ? ('- ' + n + ' [' + t + '](' + u + ')') : ('- ' + n + ' ' + t);
           lines.push(line);
         }
         var text = lines.join('\n');
+        writeClipboard(text, '已复制 ' + lines.length + ' 条到剪贴板。');
+      });
 
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(function() {
-            alert('已复制 ' + lines.length + ' 条到剪贴板。');
-          }).catch(function() {
-            prompt('复制以下内容：', text);
-          });
-        } else {
-          prompt('复制以下内容：', text);
+      // CHANGE #2: simple copy button: only "#123" per line
+      var copyNoBtn = document.createElement('button');
+      copyNoBtn.className = 'ghpn-colaction';
+      copyNoBtn.type = 'button';
+      copyNoBtn.title = '复制该列：仅 #号（每行一个）';
+      copyNoBtn.textContent = '🔢';
+      copyNoBtn.addEventListener('click', function() {
+        if (!list || !list.length) {
+          alert('列表为空，无法复制。');
+          return;
         }
+        var lines = [];
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i];
+          if (item.num) lines.push('#' + item.num);
+        }
+        var text = lines.join('\n');
+        writeClipboard(text, '已复制 ' + lines.length + ' 个 #号到剪贴板。');
       });
 
       head.appendChild(title);
       head.appendChild(count);
+      head.appendChild(copyNoBtn);
       head.appendChild(copyBtn);
 
       var ul = document.createElement('div');
@@ -1047,7 +1031,7 @@
       row1.appendChild(issue);
       row1.appendChild(link);
 
-      // Native labels under title (page scope only has labels)
+      // Keep native labels in Kanban (page scope only)
       var labelsWrap = makeNativeLabelsWrap(meta.labels || []);
       row1.appendChild(labelsWrap);
 

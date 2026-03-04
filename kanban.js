@@ -18,6 +18,9 @@
   var UI_ID = 'ghpn-modal-root';
   var FAB_ID = 'ghpn-fab';
   var STYLE_ID = 'ghpn-style';
+  var SCAN_DEBOUNCE_MS = 120;
+  var scanTimer = null;
+  var lastScanLogSig = '';
 
   function loadDB() {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
@@ -308,10 +311,162 @@
     return { key: key, num: num, title: title, url: url, linkEl: link, labels: labels };
   }
 
+  function isVisibleEl(el) {
+    if (!el) return false;
+    var cs = getComputed(el);
+    if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+    var r = getRect(el);
+    if (!r) return false;
+    return r.width > 0 && r.height > 0;
+  }
+
+  function findDetailTitleEl() {
+    var sels = [
+      '[data-testid="issue-header"] [data-testid="issue-title"]',
+      'h1 [data-testid="issue-title"]',
+      '[data-testid="issue-title"]',
+      'h1.gh-header-title .js-issue-title',
+      'h1 .js-issue-title',
+      'bdi.js-issue-title'
+    ];
+    var seen = [];
+    var fallback = null;
+    for (var i = 0; i < sels.length; i++) {
+      var list = toArray(document.querySelectorAll(sels[i]));
+      for (var j = 0; j < list.length; j++) {
+        var el = list[j];
+        if (seen.indexOf(el) !== -1) continue;
+        seen.push(el);
+        if (!fallback) fallback = el;
+        if (isVisibleEl(el)) return el;
+      }
+    }
+    return fallback;
+  }
+
+  function getIssueMetaFromDetail(repo) {
+    var m = location.pathname.match(/^\/([^\/]+)\/([^\/]+)\/issues\/(\d+)(?:$|\/|\?)/);
+    if (!m) return null;
+
+    if (repo && (repo.owner !== m[1] || repo.repo !== m[2])) return null;
+
+    var num = parseInt(m[3], 10);
+    if (!num) return null;
+
+    var titleEl = findDetailTitleEl();
+    var title = titleEl ? normName(titleEl.textContent || '') : '';
+    if (!title) title = '(no title)';
+
+    var issueUrl = location.origin + '/' + m[1] + '/' + m[2] + '/issues/' + m[3];
+    var key = buildKey({ owner: m[1], repo: m[2] }, num);
+
+    return { key: key, num: num, title: title, url: issueUrl, titleEl: titleEl, labels: [] };
+  }
+
+  function ensureDetailToolsHost(meta) {
+    if (!meta || !meta.titleEl) return null;
+
+    var titleEl = meta.titleEl;
+    var host = titleEl.parentElement || titleEl;
+
+    if (!host) return null;
+
+    var olds = toArray(document.querySelectorAll('span.ghpn-detail-tools[data-ghpn-key="' + meta.key + '"]'));
+    for (var oi = 0; oi < olds.length; oi++) {
+      if (olds[oi].parentElement !== host) olds[oi].remove();
+    }
+
+    var tools = host.querySelector('span.ghpn-detail-tools');
+    if (tools && tools.getAttribute('data-ghpn-key') !== meta.key) {
+      tools.remove();
+      tools = null;
+    }
+
+    if (!tools) {
+      tools = document.createElement('span');
+      tools.className = 'ghpn-detail-tools';
+      tools.setAttribute('data-ghpn-key', meta.key);
+      tools.style.cssText =
+        'display:inline-flex;align-items:center;gap:6px;margin-left:8px;vertical-align:middle;';
+
+      if (titleEl && titleEl.parentNode) {
+        var next = titleEl.nextSibling;
+        if (next) titleEl.parentNode.insertBefore(tools, next);
+        else titleEl.parentNode.appendChild(tools);
+      } else {
+        host.appendChild(tools);
+      }
+    }
+
+    return tools;
+  }
+
   // ---------- Inline inject: badge + edit button + quick done ----------
   // CHANGE #1: DO NOT inject native labels into the original GitHub issue list UI anymore.
+  function refreshInjectedRow(li, repo) {
+    if (!li) return;
+
+    var meta = getIssueMetaFromRow(li, repo);
+    if (!meta) return;
+    var key = meta.key;
+
+    var badge =
+      li.querySelector('span.ghpn-badge') ||
+      li.querySelector('span[data-ghpn-role="badge"]');
+    var doneBtn =
+      li.querySelector('button[data-ghpn-role="done"]') ||
+      li.querySelector('button[title="Toggle DONE (only if marked)"]');
+
+    if (!badge || !doneBtn) return;
+
+    var db = loadDB();
+    var rec = db[key];
+
+    if (hasMark(rec)) {
+      var parts = [];
+      if (rec.done) parts.push('DONE');
+      if (rec.tag) parts.push('#' + rec.tag);
+      if (rec.note) {
+        var n = safeText(rec.note).replace(/\s+/g, ' ').slice(0, 60);
+        if (n) parts.push(n);
+      }
+      badge.textContent = parts.join(' · ');
+      badge.style.display = 'inline-flex';
+
+      if (rec.done) {
+        badge.style.borderColor = '#1f883d';
+        badge.style.background = '#dafbe1';
+      } else {
+        badge.style.borderColor = '#d0d7de';
+        badge.style.background = '#f6f8fa';
+      }
+    } else {
+      badge.style.display = 'none';
+      badge.style.borderColor = '#d0d7de';
+      badge.style.background = '#f6f8fa';
+    }
+
+    if (hasMark(rec)) {
+      doneBtn.style.display = 'inline-flex';
+      if (rec.done) {
+        doneBtn.style.borderColor = '#1f883d';
+        doneBtn.style.background = '#dafbe1';
+      } else {
+        doneBtn.style.borderColor = '#d0d7de';
+        doneBtn.style.background = '#fff';
+      }
+    } else {
+      doneBtn.style.display = 'none';
+      doneBtn.style.borderColor = '#d0d7de';
+      doneBtn.style.background = '#fff';
+    }
+  }
+
   function ensureInjected(li, repo) {
-    if (li.getAttribute('data-ghpn') === '1') return;
+    if (li.getAttribute('data-ghpn') === '1') {
+      refreshInjectedRow(li, repo);
+      return;
+    }
 
     var meta = getIssueMetaFromRow(li, repo);
     if (!meta) return;
@@ -331,6 +486,7 @@
       'border-radius:999px;border:1px solid #d0d7de;background:#f6f8fa;font-size:12px;max-width:320px;' +
       'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
     badge.className = 'ghpn-badge';
+    badge.setAttribute('data-ghpn-role', 'badge');
 
     var btn = document.createElement('button');
     btn.textContent = '📝';
@@ -343,6 +499,7 @@
     var doneBtn = document.createElement('button');
     doneBtn.textContent = '✅';
     doneBtn.title = 'Toggle DONE (only if marked)';
+    doneBtn.setAttribute('data-ghpn-role', 'done');
     doneBtn.type = 'button';
     doneBtn.style.cssText =
       'display:none;align-items:center;justify-content:center;width:26px;height:26px;margin-left:6px;' +
@@ -454,6 +611,161 @@
     } catch (e) {
       warn('append failed', e);
     }
+  }
+
+  function ensureInjectedDetail(repo) {
+    var meta = getIssueMetaFromDetail(repo);
+    if (!meta || !meta.titleEl) return;
+
+    var key = meta.key;
+    var tools = ensureDetailToolsHost(meta);
+    if (!tools) return;
+
+    var badge = tools.querySelector('.ghpn-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'ghpn-badge';
+      badge.style.cssText =
+        'display:none;padding:0 8px;height:22px;line-height:22px;' +
+        'border-radius:999px;border:1px solid #d0d7de;background:#f6f8fa;font-size:12px;max-width:420px;' +
+        'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      tools.appendChild(badge);
+    }
+
+    var btn = tools.querySelector('button[data-ghpn-role="edit"]');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.setAttribute('data-ghpn-role', 'edit');
+      btn.textContent = '📝';
+      btn.title = 'Private tag/note';
+      btn.type = 'button';
+      btn.style.cssText =
+        'display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;' +
+        'border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer;user-select:none;font-size:14px;';
+      tools.appendChild(btn);
+    }
+
+    var doneBtn = tools.querySelector('button[data-ghpn-role="done"]');
+    if (!doneBtn) {
+      doneBtn = document.createElement('button');
+      doneBtn.setAttribute('data-ghpn-role', 'done');
+      doneBtn.textContent = '✅';
+      doneBtn.title = 'Toggle DONE (only if marked)';
+      doneBtn.type = 'button';
+      doneBtn.style.cssText =
+        'display:none;align-items:center;justify-content:center;width:26px;height:26px;' +
+        'border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer;user-select:none;font-size:14px;';
+      tools.appendChild(doneBtn);
+    }
+
+    function refresh() {
+      var db = loadDB();
+      var rec = db[key];
+
+      if (hasMark(rec)) {
+        var parts = [];
+        if (rec.done) parts.push('DONE');
+        if (rec.tag) parts.push('#' + rec.tag);
+        if (rec.note) {
+          var n = safeText(rec.note).replace(/\s+/g, ' ').slice(0, 60);
+          if (n) parts.push(n);
+        }
+        badge.textContent = parts.join(' · ');
+        badge.style.display = 'inline-flex';
+
+        if (rec.done) {
+          badge.style.borderColor = '#1f883d';
+          badge.style.background = '#dafbe1';
+        } else {
+          badge.style.borderColor = '#d0d7de';
+          badge.style.background = '#f6f8fa';
+        }
+      } else {
+        badge.style.display = 'none';
+        badge.style.borderColor = '#d0d7de';
+        badge.style.background = '#f6f8fa';
+      }
+
+      if (hasMark(rec)) {
+        doneBtn.style.display = 'inline-flex';
+        if (rec.done) {
+          doneBtn.style.borderColor = '#1f883d';
+          doneBtn.style.background = '#dafbe1';
+        } else {
+          doneBtn.style.borderColor = '#d0d7de';
+          doneBtn.style.background = '#fff';
+        }
+      } else {
+        doneBtn.style.display = 'none';
+        doneBtn.style.borderColor = '#d0d7de';
+        doneBtn.style.background = '#fff';
+      }
+    }
+
+    function openEditPrompts(existingRec) {
+      var latestMeta = getIssueMetaFromDetail(repo) || meta;
+      var db = loadDB();
+      var rec = existingRec || db[key] || {};
+
+      var tag = prompt('Tag for ' + key + ' (empty ok)', rec.tag || '');
+      if (tag === null) return;
+
+      var note = prompt('Note for ' + key + ' (empty ok)', rec.note || '');
+      if (note === null) return;
+
+      tag = String(tag).trim();
+      note = String(note).trim();
+
+      if (!tag && !note && !rec.done) {
+        delete db[key];
+      } else {
+        upsertRecord(db, key, {
+          tag: tag,
+          note: note,
+          done: !!rec.done,
+          title: latestMeta.title || meta.title || '',
+          url: latestMeta.url || meta.url,
+          updatedAt: nowISO()
+        });
+      }
+
+      saveDB(db);
+      refresh();
+      tryRenderModalIfOpen();
+      log('saved(detail)', key);
+    }
+
+    if (btn.getAttribute('data-ghpn-bound') !== '1') {
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        openEditPrompts(null);
+      });
+      btn.setAttribute('data-ghpn-bound', '1');
+    }
+
+    if (doneBtn.getAttribute('data-ghpn-bound') !== '1') {
+      doneBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        var db = loadDB();
+        var rec = db[key];
+        if (!hasMark(rec)) {
+          alert('这个 issue 还没标注（tag/note）。先点 📝 标注一下，再用 ✅ 切换 DONE。');
+          return;
+        }
+        rec.done = !rec.done;
+        rec.updatedAt = nowISO();
+        db[key] = rec;
+        saveDB(db);
+        refresh();
+        tryRenderModalIfOpen();
+      });
+      doneBtn.setAttribute('data-ghpn-bound', '1');
+    }
+
+    refresh();
   }
 
   // ---------- Kanban modal ----------
@@ -625,6 +937,7 @@
     var root = document.getElementById(UI_ID);
     if (!root) return;
     root.classList.remove('open');
+    scan();
   }
 
   function isModalOpen() {
@@ -1163,24 +1476,38 @@
     var repo = getRepoFromPath();
     if (!repo) return;
 
+    ensureInjectedDetail(repo);
+
     var rows = findRows();
-    log('scan rows=', rows.length, 'url=', location.href);
+    var sig = String(rows.length) + '|' + String(location.href);
+    if (sig !== lastScanLogSig) {
+      lastScanLogSig = sig;
+      log('scan rows=', rows.length, 'url=', location.href);
+    }
 
     for (var i = 0; i < rows.length; i++) {
       ensureInjected(rows[i], repo);
     }
   }
 
+  function scheduleScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(function () {
+      scanTimer = null;
+      scan();
+    }, SCAN_DEBOUNCE_MS);
+  }
+
   function boot() {
     scan();
     ensureFAB();
 
-    var mo = new MutationObserver(function () { scan(); });
+    var mo = new MutationObserver(function () { scheduleScan(); });
     mo.observe(document.body, { childList: true, subtree: true });
 
-    window.addEventListener('turbo:load', function () { scan(); });
-    window.addEventListener('pjax:end', function () { scan(); });
-    window.addEventListener('popstate', function () { scan(); });
+    window.addEventListener('turbo:load', function () { scheduleScan(); });
+    window.addEventListener('pjax:end', function () { scheduleScan(); });
+    window.addEventListener('popstate', function () { scheduleScan(); });
 
     log('booted');
   }

@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GHPN Minimal (ListView) + Kanban + DnD + Export/Import + Copy + Native Labels
-// @namespace    https://example.local/
+// @name         GitHub Issue Private Manager (Notes + Kanban)
+// @namespace    https://github.com/astarx233/github_issue_private_manager
 // @version      0.3.3
-// @description  Private tag/note + Kanban modal (3 cols) + drag/drop + quick DONE + export/import + Copy List + Native GitHub labels in Kanban only. No template literals.
+// @description  Local-only private notes/tags for GitHub Issues with a 3-column Kanban workflow, drag-and-drop status, quick Done toggle, import/export, per-column copy, and native GitHub labels in Kanban view.
 // @match        https://github.com/*/*/issues*
 // @grant        none
 // ==/UserScript==
@@ -835,7 +835,7 @@
 
     var title = document.createElement('div');
     title.className = 'ghpn-title';
-    title.textContent = 'GHPN 看板（可拖拽）';
+    title.textContent = 'GitHub Issue Private Manager 看板（可拖拽）';
 
     var scopeBtn = document.createElement('button');
     scopeBtn.className = 'ghpn-btn';
@@ -919,7 +919,7 @@
     btn = document.createElement('button');
     btn.id = FAB_ID;
     btn.type = 'button';
-    btn.title = '打开 GHPN 看板';
+    btn.title = '打开 GitHub Issue Private Manager 看板';
     btn.textContent = '📋';
     btn.addEventListener('click', function () { openModal(); });
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub Issue Private Manager (Notes + Kanban)
 // @namespace    https://github.com/astarx233/github_issue_private_manager
-// @version      0.3.3
-// @description  Local-only private notes/tags for GitHub Issues with a 3-column Kanban workflow, drag-and-drop status, quick Done toggle, import/export, per-column copy, and native GitHub labels in Kanban view.
+// @version      0.3.4
+// @description  Local-only private notes/tags for GitHub Issues with a 3-column Kanban workflow, drag-and-drop status, quick Done toggle, import/export, enriched per-column copy, and native GitHub labels in Kanban view.
 // @match        https://github.com/*/*/issues*
 // @grant        none
 // ==/UserScript==
@@ -792,7 +792,8 @@
       '#'+UI_ID+' .ghpn-body{flex:1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:10px;background:#fff;overflow:hidden;}' +
       '#'+UI_ID+' .ghpn-col{border:1px solid #d0d7de;border-radius:10px;display:flex;flex-direction:column;overflow:hidden;}' +
       '#'+UI_ID+' .ghpn-colhead{padding:10px 10px;border-bottom:1px solid #d0d7de;background:#f6f8fa;font-size:12px;font-weight:700;display:flex;align-items:center;gap:8px;}' +
-      '#'+UI_ID+' .ghpn-colaction{margin-left:auto;border:none;background:none;cursor:pointer;opacity:0.6;font-size:14px;padding:2px 6px;border-radius:4px;}' +
+      '#'+UI_ID+' .ghpn-colactions{margin-left:auto;display:flex;align-items:center;gap:4px;}' +
+      '#'+UI_ID+' .ghpn-colaction{border:none;background:none;cursor:pointer;opacity:0.6;font-size:14px;padding:2px 6px;border-radius:4px;}' +
       '#'+UI_ID+' .ghpn-colaction:hover{opacity:1;background:rgba(0,0,0,0.05);}' +
       '#'+UI_ID+' .ghpn-count{font-weight:600;color:#57606a;}' +
       '#'+UI_ID+' .ghpn-list{padding:8px;overflow:auto;}' +
@@ -1233,6 +1234,29 @@
       }
     }
 
+    function normalizeInlineText(s) {
+      return safeText(s).replace(/\s+/g, ' ').trim();
+    }
+
+    function formatIssueMarkdownLine(item, includeLocalMark) {
+      var n = item.num ? ('#' + item.num) : '???';
+      var t = normalizeInlineText(item.title).replace(/[\[\]]/g, '');
+      var u = item.url || '';
+      var line = u ? ('- ' + n + ' [' + t + '](' + u + ')') : ('- ' + n + ' ' + t);
+
+      if (!includeLocalMark) return line;
+
+      var rec = db[item.key] || null;
+      var extras = [];
+      if (rec) {
+        if (rec.tag) extras.push('#' + normalizeInlineText(rec.tag));
+        if (rec.note) extras.push(normalizeInlineText(rec.note));
+      }
+      if (extras.length) line += ' · ' + extras.join(' · ');
+
+      return line;
+    }
+
     function makeCol(titleText, list, colName) {
       var col = document.createElement('div');
       col.className = 'ghpn-col';
@@ -1263,15 +1287,28 @@
         }
         var lines = [];
         for (var i = 0; i < list.length; i++) {
-          var item = list[i];
-          var n = item.num ? ('#' + item.num) : '???';
-          var t = (item.title || '').replace(/[\[\]]/g, '');
-          var u = item.url || '';
-          var line = u ? ('- ' + n + ' [' + t + '](' + u + ')') : ('- ' + n + ' ' + t);
-          lines.push(line);
+          lines.push(formatIssueMarkdownLine(list[i], false));
         }
         var text = lines.join('\n');
         writeClipboard(text, '已复制 ' + lines.length + ' 条到剪贴板。');
+      });
+
+      var copyMarkedBtn = document.createElement('button');
+      copyMarkedBtn.className = 'ghpn-colaction';
+      copyMarkedBtn.type = 'button';
+      copyMarkedBtn.title = '复制该列为列表 (Markdown，附 tag/note)';
+      copyMarkedBtn.textContent = '📋';
+      copyMarkedBtn.addEventListener('click', function() {
+        if (!list || !list.length) {
+          alert('列表为空，无法复制。');
+          return;
+        }
+        var lines = [];
+        for (var i = 0; i < list.length; i++) {
+          lines.push(formatIssueMarkdownLine(list[i], true));
+        }
+        var text = lines.join('\n');
+        writeClipboard(text, '已复制 ' + lines.length + ' 条（含 tag/note）到剪贴板。');
       });
 
       // CHANGE #2: simple copy button: only "#123" per line
@@ -1294,10 +1331,15 @@
         writeClipboard(text, '已复制 ' + lines.length + ' 个 #号到剪贴板。');
       });
 
+      var actionWrap = document.createElement('div');
+      actionWrap.className = 'ghpn-colactions';
+      actionWrap.appendChild(copyNoBtn);
+      actionWrap.appendChild(copyBtn);
+      actionWrap.appendChild(copyMarkedBtn);
+
       head.appendChild(title);
       head.appendChild(count);
-      head.appendChild(copyNoBtn);
-      head.appendChild(copyBtn);
+      head.appendChild(actionWrap);
 
       var ul = document.createElement('div');
       ul.className = 'ghpn-list';

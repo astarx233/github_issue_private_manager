@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GitHub Issue Private Manager (Notes + Kanban)
 // @namespace    https://github.com/astarx233/github_issue_private_manager
-// @version      0.3.4
-// @description  Local-only private notes/tags for GitHub Issues with a 3-column Kanban workflow, drag-and-drop status, quick Done toggle, import/export, enriched per-column copy, and native GitHub labels in Kanban view.
+// @version      0.3.5
+// @description  Local-only private notes/tags for GitHub Issues with a 3-column Kanban workflow, drag-and-drop status, quick Done toggle, import/export, configurable sheet target, and native GitHub labels in Kanban view.
 // @match        https://github.com/*/*/issues*
 // @grant        none
 // ==/UserScript==
@@ -15,6 +15,7 @@
   function warn() { if (DEBUG) console.warn.apply(console, ['[GHPN]'].concat([].slice.call(arguments))); }
 
   var STORAGE_KEY = 'ghpn_notes_v1';
+  var CONFIG_KEY = 'ghpn_config_v1';
   var UI_ID = 'ghpn-modal-root';
   var FAB_ID = 'ghpn-fab';
   var STYLE_ID = 'ghpn-style';
@@ -28,8 +29,21 @@
   }
   function saveDB(db) { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
 
+  function loadConfig() {
+    try { return JSON.parse(localStorage.getItem(CONFIG_KEY) || '{}'); }
+    catch (e) { return {}; }
+  }
+
+  function saveConfig(cfg) {
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(cfg || {}));
+  }
+
   function safeText(s) {
     return String(s == null ? '' : s);
+  }
+
+  function normalizeInlineText(s) {
+    return safeText(s).replace(/\s+/g, ' ').trim();
   }
 
   function nowISO() {
@@ -90,6 +104,16 @@
       if (!exists) out.push(el);
     }
     return out;
+  }
+
+  function sameStringArray(a, b) {
+    a = a || [];
+    b = b || [];
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (String(a[i]) !== String(b[i])) return false;
+    }
+    return true;
   }
 
   function normName(s) {
@@ -294,6 +318,132 @@
     return wrap;
   }
 
+  function labelsToNames(labels) {
+    var out = [];
+    for (var i = 0; i < (labels || []).length; i++) {
+      var raw = labels[i];
+      var name = '';
+      if (typeof raw === 'string') name = normalizeInlineText(raw);
+      else if (raw && typeof raw === 'object') name = normalizeInlineText(raw.name);
+      if (!name) continue;
+      if (out.indexOf(name) === -1) out.push(name);
+    }
+    return out;
+  }
+
+  function extractIssueStateFromRow(li) {
+    if (!li) return '';
+
+    var iconMap = [
+      { sel: 'svg.octicon-issue-opened, svg[class*="octicon-issue-opened"]', value: 'Open' },
+      { sel: 'svg.octicon-issue-closed, svg[class*="octicon-issue-closed"]', value: 'Closed' },
+      { sel: 'svg.octicon-issue-draft, svg[class*="octicon-issue-draft"]', value: 'Draft' }
+    ];
+    for (var i = 0; i < iconMap.length; i++) {
+      if (li.querySelector(iconMap[i].sel)) return iconMap[i].value;
+    }
+
+    var attrNodes = toArray(li.querySelectorAll('[aria-label],[title]'));
+    for (var j = 0; j < attrNodes.length; j++) {
+      var attrText = normalizeInlineText(attrNodes[j].getAttribute('aria-label') || attrNodes[j].getAttribute('title') || '');
+      if (!attrText) continue;
+      if (/^open(?: issue)?$/i.test(attrText) || /\bopen issue\b/i.test(attrText)) return 'Open';
+      if (/^closed(?: issue)?$/i.test(attrText) || /\bclosed issue\b/i.test(attrText)) return 'Closed';
+      if (/^draft(?: issue)?$/i.test(attrText) || /\bdraft issue\b/i.test(attrText)) return 'Draft';
+    }
+
+    var textNodes = toArray(li.querySelectorAll('span, div, a'));
+    for (var k = 0; k < textNodes.length; k++) {
+      var text = normalizeInlineText(textNodes[k].textContent || '');
+      if (!text || text.length > 32) continue;
+      if (/^open$/i.test(text)) return 'Open';
+      if (/^closed$/i.test(text)) return 'Closed';
+      if (/^draft$/i.test(text)) return 'Draft';
+    }
+
+    return '';
+  }
+
+  function extractMilestoneFromRow(li) {
+    if (!li) return '';
+
+    var links = toArray(li.querySelectorAll('a[href]'));
+    for (var i = 0; i < links.length; i++) {
+      var href = links[i].getAttribute('href') || '';
+      if (!/\/milestone\/|[?&]milestone=/.test(href)) continue;
+      var text = normalizeInlineText(links[i].textContent || links[i].getAttribute('title') || '');
+      if (text) return text;
+    }
+
+    var nodes = toArray(li.querySelectorAll('[aria-label],[title],span,div'));
+    for (var j = 0; j < nodes.length; j++) {
+      var raw = normalizeInlineText(
+        (nodes[j].getAttribute && (nodes[j].getAttribute('aria-label') || nodes[j].getAttribute('title'))) ||
+        nodes[j].textContent ||
+        ''
+      );
+      var m = raw.match(/^milestone[:：]\s*(.+)$/i);
+      if (m && m[1]) return normalizeInlineText(m[1]);
+    }
+
+    return '';
+  }
+
+  function inferPriorityFromLabels(labelNames) {
+    for (var i = 0; i < (labelNames || []).length; i++) {
+      var label = normalizeInlineText(labelNames[i]);
+      if (!label) continue;
+
+      if (/^p[0-4]$/i.test(label)) return label.toUpperCase();
+
+      var m1 = label.match(/^priority\s*[:/-]\s*(.+)$/i);
+      if (m1 && m1[1]) return normalizeInlineText(m1[1]);
+
+      var m2 = label.match(/^优先级\s*[:：/-]\s*(.+)$/i);
+      if (m2 && m2[1]) return normalizeInlineText(m2[1]);
+    }
+    return '';
+  }
+
+  function buildStoredIssueMeta(meta, rec) {
+    rec = rec || {};
+    var labelNames = (meta && meta.labelNames && meta.labelNames.length)
+      ? meta.labelNames.slice()
+      : ((rec.labelNames && rec.labelNames.length) ? rec.labelNames.slice() : []);
+
+    return {
+      title: (meta && meta.title) ? meta.title : (rec.title || ''),
+      url: (meta && meta.url) ? meta.url : (rec.url || ''),
+      issueState: (meta && meta.issueState) ? meta.issueState : (rec.issueState || ''),
+      milestone: (meta && meta.milestone) ? meta.milestone : (rec.milestone || ''),
+      labelNames: labelNames
+    };
+  }
+
+  function syncMarkedIssueMetaList(list) {
+    var db = loadDB();
+    var changed = false;
+
+    for (var i = 0; i < (list || []).length; i++) {
+      var meta = list[i];
+      var rec = db[meta.key];
+      if (!rec) continue;
+
+      var stored = buildStoredIssueMeta(meta, rec);
+
+      if ((rec.title || '') !== stored.title) { rec.title = stored.title; changed = true; }
+      if ((rec.url || '') !== stored.url) { rec.url = stored.url; changed = true; }
+      if ((rec.issueState || '') !== stored.issueState) { rec.issueState = stored.issueState; changed = true; }
+      if ((rec.milestone || '') !== stored.milestone) { rec.milestone = stored.milestone; changed = true; }
+      if (!sameStringArray(rec.labelNames || [], stored.labelNames || [])) {
+        rec.labelNames = stored.labelNames.slice();
+        changed = true;
+      }
+    }
+
+    if (changed) saveDB(db);
+  }
+
   function getIssueMetaFromRow(li, repo) {
     var link = li.querySelector('a[data-testid="issue-pr-title-link"]');
     if (!link) return null;
@@ -307,8 +457,21 @@
     var url = new URL(href, location.origin).toString();
 
     var labels = extractLabelsFromRow(li);
+    var labelNames = labelsToNames(labels);
+    var issueState = extractIssueStateFromRow(li);
+    var milestone = extractMilestoneFromRow(li);
 
-    return { key: key, num: num, title: title, url: url, linkEl: link, labels: labels };
+    return {
+      key: key,
+      num: num,
+      title: title,
+      url: url,
+      linkEl: link,
+      labels: labels,
+      labelNames: labelNames,
+      issueState: issueState,
+      milestone: milestone
+    };
   }
 
   function isVisibleEl(el) {
@@ -360,7 +523,30 @@
     var issueUrl = location.origin + '/' + m[1] + '/' + m[2] + '/issues/' + m[3];
     var key = buildKey({ owner: m[1], repo: m[2] }, num);
 
-    return { key: key, num: num, title: title, url: issueUrl, titleEl: titleEl, labels: [] };
+    return {
+      key: key,
+      num: num,
+      title: title,
+      url: issueUrl,
+      titleEl: titleEl,
+      labels: [],
+      labelNames: [],
+      issueState: '',
+      milestone: ''
+    };
+  }
+
+  function openGoogleSheetForPaste() {
+    var cfg = loadConfig();
+    var targetUrl = normalizeInlineText(cfg.sheetUrl || '');
+    if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://sheet.new';
+    try {
+      var win = window.open(targetUrl, '_blank');
+      if (win) win.opener = null;
+      return !!win;
+    } catch (e) {
+      return false;
+    }
   }
 
   function ensureDetailToolsHost(meta) {
@@ -565,12 +751,16 @@
       if (!tag && !note && !rec.done) {
         delete db[key];
       } else {
+        var storedMeta = buildStoredIssueMeta(meta, rec);
         upsertRecord(db, key, {
           tag: tag,
           note: note,
           done: !!rec.done,
-          title: (link.textContent || '').trim(),
-          url: meta.url,
+          title: storedMeta.title || (link.textContent || '').trim(),
+          url: storedMeta.url || meta.url,
+          issueState: storedMeta.issueState,
+          milestone: storedMeta.milestone,
+          labelNames: storedMeta.labelNames,
           updatedAt: nowISO()
         });
       }
@@ -719,12 +909,16 @@
       if (!tag && !note && !rec.done) {
         delete db[key];
       } else {
+        var storedMeta = buildStoredIssueMeta(latestMeta, rec);
         upsertRecord(db, key, {
           tag: tag,
           note: note,
           done: !!rec.done,
-          title: latestMeta.title || meta.title || '',
-          url: latestMeta.url || meta.url,
+          title: storedMeta.title,
+          url: storedMeta.url,
+          issueState: storedMeta.issueState,
+          milestone: storedMeta.milestone,
+          labelNames: storedMeta.labelNames,
           updatedAt: nowISO()
         });
       }
@@ -808,6 +1002,13 @@
       '#'+UI_ID+' .ghpn-meta{margin-top:6px;font-size:12px;color:#57606a;}' +
       '#'+UI_ID+' .ghpn-actions{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;}' +
       '#'+UI_ID+' .ghpn-checkbox{display:inline-flex;align-items:center;gap:6px;font-size:12px;}' +
+      '#'+UI_ID+' .ghpn-configbackdrop{position:absolute;inset:0;background:rgba(0,0,0,0.2);display:none;align-items:center;justify-content:center;padding:20px;}' +
+      '#'+UI_ID+' .ghpn-configbackdrop.open{display:flex;}' +
+      '#'+UI_ID+' .ghpn-configpanel{width:min(560px,90vw);background:#fff;border:1px solid #d0d7de;border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,0.18);padding:16px;display:flex;flex-direction:column;gap:12px;}' +
+      '#'+UI_ID+' .ghpn-configtitle{font-size:14px;font-weight:700;color:#24292f;}' +
+      '#'+UI_ID+' .ghpn-configdesc{font-size:12px;color:#57606a;line-height:1.5;}' +
+      '#'+UI_ID+' .ghpn-configinput{width:100%;box-sizing:border-box;border:1px solid #d0d7de;border-radius:8px;padding:8px 10px;font-size:12px;}' +
+      '#'+UI_ID+' .ghpn-configactions{display:flex;justify-content:flex-end;gap:8px;}' +
       '#'+FAB_ID+'{position:fixed;right:18px;bottom:18px;z-index:999998;' +
         'width:44px;height:44px;border-radius:999px;border:1px solid #d0d7de;' +
         'background:#fff;box-shadow:0 8px 20px rgba(0,0,0,0.18);cursor:pointer;font-size:18px;}' +
@@ -864,6 +1065,11 @@
     refreshBtn.type = 'button';
     refreshBtn.textContent = '刷新';
 
+    var configBtn = document.createElement('button');
+    configBtn.className = 'ghpn-btn';
+    configBtn.type = 'button';
+    configBtn.textContent = '配置';
+
     var closeBtn = document.createElement('button');
     closeBtn.className = 'ghpn-btn';
     closeBtn.type = 'button';
@@ -878,6 +1084,7 @@
     head.appendChild(spacer);
     head.appendChild(exportBtn);
     head.appendChild(importBtn);
+    head.appendChild(configBtn);
     head.appendChild(refreshBtn);
     head.appendChild(closeBtn);
 
@@ -885,15 +1092,103 @@
     body.className = 'ghpn-body';
     body.setAttribute('data-ghpn-body', '1');
 
+    var configBackdrop = document.createElement('div');
+    configBackdrop.className = 'ghpn-configbackdrop';
+
+    var configPanel = document.createElement('div');
+    configPanel.className = 'ghpn-configpanel';
+
+    var configTitle = document.createElement('div');
+    configTitle.className = 'ghpn-configtitle';
+    configTitle.textContent = '表格配置';
+
+    var configDesc = document.createElement('div');
+    configDesc.className = 'ghpn-configdesc';
+    configDesc.textContent = '填写后，列头的 📊 会优先打开这个 Google Sheets / Excel Online 链接；留空则打开新的 sheet.new。';
+
+    var configInput = document.createElement('input');
+    configInput.className = 'ghpn-configinput';
+    configInput.type = 'url';
+    configInput.placeholder = 'https://docs.google.com/spreadsheets/...';
+
+    var configActions = document.createElement('div');
+    configActions.className = 'ghpn-configactions';
+
+    var clearConfigBtn = document.createElement('button');
+    clearConfigBtn.className = 'ghpn-btn';
+    clearConfigBtn.type = 'button';
+    clearConfigBtn.textContent = '清空';
+
+    var cancelConfigBtn = document.createElement('button');
+    cancelConfigBtn.className = 'ghpn-btn';
+    cancelConfigBtn.type = 'button';
+    cancelConfigBtn.textContent = '取消';
+
+    var saveConfigBtn = document.createElement('button');
+    saveConfigBtn.className = 'ghpn-btn';
+    saveConfigBtn.type = 'button';
+    saveConfigBtn.textContent = '保存';
+
+    configActions.appendChild(clearConfigBtn);
+    configActions.appendChild(cancelConfigBtn);
+    configActions.appendChild(saveConfigBtn);
+
+    configPanel.appendChild(configTitle);
+    configPanel.appendChild(configDesc);
+    configPanel.appendChild(configInput);
+    configPanel.appendChild(configActions);
+    configBackdrop.appendChild(configPanel);
+
     panel.appendChild(head);
     panel.appendChild(body);
+    panel.appendChild(configBackdrop);
 
     root.appendChild(backdrop);
     root.appendChild(panel);
 
+    function closeConfigDialog() {
+      configBackdrop.classList.remove('open');
+    }
+
+    function openConfigDialog() {
+      var cfg = loadConfig();
+      configInput.value = cfg.sheetUrl || '';
+      configBackdrop.classList.add('open');
+      setTimeout(function () {
+        try { configInput.focus(); configInput.select(); } catch (e) {}
+      }, 0);
+    }
+
     backdrop.addEventListener('click', function () { closeModal(); });
     closeBtn.addEventListener('click', function () { closeModal(); });
     refreshBtn.addEventListener('click', function () { renderModal(); });
+    configBtn.addEventListener('click', function () { openConfigDialog(); });
+    cancelConfigBtn.addEventListener('click', function () { closeConfigDialog(); });
+    configBackdrop.addEventListener('click', function (e) {
+      if (e.target === configBackdrop) closeConfigDialog();
+    });
+    configPanel.addEventListener('click', function (e) { e.stopPropagation(); });
+    clearConfigBtn.addEventListener('click', function () {
+      saveConfig({});
+      configInput.value = '';
+      closeConfigDialog();
+      alert('已清空表格链接配置。📊 将恢复打开新的 sheet.new。');
+    });
+    saveConfigBtn.addEventListener('click', function () {
+      var val = normalizeInlineText(configInput.value || '');
+      if (val && !/^https?:\/\//i.test(val)) {
+        alert('链接需要以 http:// 或 https:// 开头。');
+        return;
+      }
+      saveConfig(val ? { sheetUrl: val } : {});
+      closeConfigDialog();
+      if (val) alert('已保存表格链接。📊 将优先打开这个链接。');
+      else alert('未填写链接。📊 将打开新的 sheet.new。');
+    });
+    configInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeConfigDialog();
+      if (e.key === 'Enter') saveConfigBtn.click();
+    });
 
     scopeBtn.addEventListener('click', function () {
       var cur = scopeBtn.getAttribute('data-scope') || 'page';
@@ -957,6 +1252,7 @@
       var meta = getIssueMetaFromRow(rows[i], repo);
       if (meta) out.push(meta);
     }
+    syncMarkedIssueMetaList(out);
     return out;
   }
 
@@ -979,7 +1275,10 @@
         title: rec.title || '',
         url: rec.url || '',
         linkEl: null,
-        labels: []
+        labels: [],
+        labelNames: (rec.labelNames || []).slice(),
+        issueState: rec.issueState || '',
+        milestone: rec.milestone || ''
       });
     }
     out.sort(function (a, b) {
@@ -1107,6 +1406,9 @@
           done: false,
           title: meta.title || '',
           url: meta.url || '',
+          issueState: meta.issueState || '',
+          milestone: meta.milestone || '',
+          labelNames: (meta.labelNames || []).slice(),
           updatedAt: nowISO()
         };
       } else {
@@ -1234,27 +1536,58 @@
       }
     }
 
-    function normalizeInlineText(s) {
-      return safeText(s).replace(/\s+/g, ' ').trim();
-    }
-
-    function formatIssueMarkdownLine(item, includeLocalMark) {
+    function formatIssueMarkdownLine(item) {
       var n = item.num ? ('#' + item.num) : '???';
       var t = normalizeInlineText(item.title).replace(/[\[\]]/g, '');
       var u = item.url || '';
-      var line = u ? ('- ' + n + ' [' + t + '](' + u + ')') : ('- ' + n + ' ' + t);
+      return u ? ('- ' + n + ' [' + t + '](' + u + ')') : ('- ' + n + ' ' + t);
+    }
 
-      if (!includeLocalMark) return line;
+    function escapeTsvCell(s) {
+      return normalizeInlineText(s).replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+    }
 
-      var rec = db[item.key] || null;
-      var extras = [];
-      if (rec) {
-        if (rec.tag) extras.push('#' + normalizeInlineText(rec.tag));
-        if (rec.note) extras.push(normalizeInlineText(rec.note));
+    function getItemLabelNames(item, rec) {
+      if (item && item.labelNames && item.labelNames.length) return item.labelNames.slice();
+      if (rec && rec.labelNames && rec.labelNames.length) return rec.labelNames.slice();
+      if (item && item.labels && item.labels.length) return labelsToNames(item.labels);
+      return [];
+    }
+
+    function buildGoogleSheetsText(items) {
+      var headers = [
+        'Issue id',
+        'link',
+        '标题',
+        '优先级',
+        'Issue 状态',
+        'Milestone',
+        "Labels(issues')",
+        'Tag(local)',
+        'Notes(local)'
+      ];
+
+      var lines = [headers.join('\t')];
+      items = items || [];
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var rec = db[item.key] || null;
+        var labelNames = getItemLabelNames(item, rec);
+        var row = [
+          escapeTsvCell(item.num != null ? String(item.num) : item.key),
+          escapeTsvCell(item.url || (rec && rec.url) || ''),
+          escapeTsvCell(item.title || (rec && rec.title) || ''),
+          escapeTsvCell(inferPriorityFromLabels(labelNames)),
+          escapeTsvCell(item.issueState || (rec && rec.issueState) || ''),
+          escapeTsvCell(item.milestone || (rec && rec.milestone) || ''),
+          escapeTsvCell(labelNames.join(', ')),
+          escapeTsvCell((rec && rec.tag) || ''),
+          escapeTsvCell((rec && rec.note) || '')
+        ];
+        lines.push(row.join('\t'));
       }
-      if (extras.length) line += ' · ' + extras.join(' · ');
 
-      return line;
+      return lines.join('\n');
     }
 
     function makeCol(titleText, list, colName) {
@@ -1287,28 +1620,28 @@
         }
         var lines = [];
         for (var i = 0; i < list.length; i++) {
-          lines.push(formatIssueMarkdownLine(list[i], false));
+          lines.push(formatIssueMarkdownLine(list[i]));
         }
         var text = lines.join('\n');
         writeClipboard(text, '已复制 ' + lines.length + ' 条到剪贴板。');
       });
 
-      var copyMarkedBtn = document.createElement('button');
-      copyMarkedBtn.className = 'ghpn-colaction';
-      copyMarkedBtn.type = 'button';
-      copyMarkedBtn.title = '复制该列为列表 (Markdown，附 tag/note)';
-      copyMarkedBtn.textContent = '📋';
-      copyMarkedBtn.addEventListener('click', function() {
+      var sheetsBtn = document.createElement('button');
+      sheetsBtn.className = 'ghpn-colaction';
+      sheetsBtn.type = 'button';
+      sheetsBtn.title = '导出到 Google Sheets（复制 TSV 并尝试打开 Sheet）';
+      sheetsBtn.textContent = '📊';
+      sheetsBtn.addEventListener('click', function() {
         if (!list || !list.length) {
           alert('列表为空，无法复制。');
           return;
         }
-        var lines = [];
-        for (var i = 0; i < list.length; i++) {
-          lines.push(formatIssueMarkdownLine(list[i], true));
-        }
-        var text = lines.join('\n');
-        writeClipboard(text, '已复制 ' + lines.length + ' 条（含 tag/note）到剪贴板。');
+        var text = buildGoogleSheetsText(list);
+        var opened = openGoogleSheetForPaste();
+        var msg = '已复制 ' + list.length + ' 条为 Google Sheets 表格格式。';
+        if (opened) msg += ' 并已尝试打开新 Sheet，直接粘贴即可。';
+        else msg += ' 新 Sheet 未自动打开，请手动新建后粘贴。';
+        writeClipboard(text, msg);
       });
 
       // CHANGE #2: simple copy button: only "#123" per line
@@ -1335,7 +1668,7 @@
       actionWrap.className = 'ghpn-colactions';
       actionWrap.appendChild(copyNoBtn);
       actionWrap.appendChild(copyBtn);
-      actionWrap.appendChild(copyMarkedBtn);
+      actionWrap.appendChild(sheetsBtn);
 
       head.appendChild(title);
       head.appendChild(count);
@@ -1453,12 +1786,16 @@
         if (!tag && !note && !r2.done) {
           delete db2[meta.key];
         } else {
+          var storedMeta = buildStoredIssueMeta(meta, r2);
           upsertRecord(db2, meta.key, {
             tag: tag,
             note: note,
             done: !!r2.done,
-            title: meta.title || r2.title || '',
-            url: meta.url || r2.url || '',
+            title: storedMeta.title,
+            url: storedMeta.url,
+            issueState: storedMeta.issueState,
+            milestone: storedMeta.milestone,
+            labelNames: storedMeta.labelNames,
             updatedAt: nowISO()
           });
         }
